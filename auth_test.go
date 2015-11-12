@@ -1,4 +1,4 @@
-package aauth
+package kauth
 
 import (
 	"bytes"
