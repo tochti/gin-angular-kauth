@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tochti/session-stores"
 )
 
 const (
@@ -34,29 +35,16 @@ type (
 		Err    string
 	}
 
+	SessionResponse struct {
+		Token   string
+		UserID  string
+		Expires time.Time
+	}
+
 	ErrorHandler func(*gin.Context) error
 
 	UserIDData struct {
 		ID string
-	}
-
-	SessionData struct {
-		Token   string    `bson:"Token"`
-		UserID  string    `bson:"UserID"`
-		Expires time.Time `bson:"Expires"`
-	}
-
-	Session interface {
-		Token() string
-		UserID() string
-		Expires() time.Time
-	}
-
-	SessionStore interface {
-		NewSession(string, time.Time) (string, error)
-		ReadSession(string) (Session, bool)
-		RemoveSession(string) error
-		RemoveExpiredSessions() (int, error)
 	}
 
 	User interface {
@@ -91,15 +79,15 @@ func NewSha512Password(pass string) string {
 	return passHash
 }
 
-func ReadSession(c *gin.Context) (SessionData, error) {
+func ReadSession(c *gin.Context) (s2tore.Session, error) {
 	v, ok := c.Get(GinContextField)
 	if !ok {
-		return SessionData{}, CookieErr
+		return nil, CookieErr
 	}
 
-	s, ok := v.(SessionData)
+	s, ok := v.(s2tore.Session)
 	if !ok {
-		return SessionData{}, CookieErr
+		return nil, CookieErr
 	}
 
 	return s, nil
@@ -116,7 +104,7 @@ func ErrorWrap(h ErrorHandler) gin.HandlerFunc {
 
 }
 
-func SignedIn(s SessionStore) func(gin.HandlerFunc) gin.HandlerFunc {
+func SignedIn(s s2tore.SessionStore) func(gin.HandlerFunc) gin.HandlerFunc {
 	return func(h gin.HandlerFunc) gin.HandlerFunc {
 		return func(c *gin.Context) {
 			err := Bouncer(c, s)
@@ -131,7 +119,7 @@ func SignedIn(s SessionStore) func(gin.HandlerFunc) gin.HandlerFunc {
 	}
 }
 
-func Bouncer(c *gin.Context, s SessionStore) error {
+func Bouncer(c *gin.Context, s s2tore.SessionStore) error {
 	token := c.Request.Header.Get(TokenHeaderField)
 	if token == "" {
 		cookie, err := c.Request.Cookie(XSRFCookieName)
@@ -150,17 +138,11 @@ func Bouncer(c *gin.Context, s SessionStore) error {
 
 	}
 
-	ctxSession := SessionData{
-		Token:   session.Token(),
-		UserID:  session.UserID(),
-		Expires: session.Expires(),
-	}
-
-	c.Set(GinContextField, ctxSession)
+	c.Set(GinContextField, session)
 	return nil
 }
 
-func SignIn(s SessionStore, u UserStore) gin.HandlerFunc {
+func SignIn(s s2tore.SessionStore, u UserStore) gin.HandlerFunc {
 	handler := func(c *gin.Context) error {
 		return Signer(c, s, u)
 	}
@@ -169,7 +151,7 @@ func SignIn(s SessionStore, u UserStore) gin.HandlerFunc {
 
 }
 
-func Signer(c *gin.Context, s SessionStore, u UserStore) error {
+func Signer(c *gin.Context, s s2tore.SessionStore, u UserStore) error {
 	name := c.Params.ByName(NameRequestField)
 	pass := c.Params.ByName(PassRequestField)
 
@@ -182,28 +164,24 @@ func Signer(c *gin.Context, s SessionStore, u UserStore) error {
 		return SignInErr
 	}
 
-	resp := NewSuccessResponse(UserIDData{
-		ID: user.ID(),
-	})
-
 	expire := time.Now().Add(24 * time.Hour)
-	token, err := s.NewSession(user.ID(), expire)
+	session, err := s.NewSession(user.ID(), expire)
 	if err != nil {
 		return err
 	}
 
-	session := SessionData{
-		UserID:  user.ID(),
-		Token:   token,
-		Expires: expire,
-	}
-
 	c.Set(GinContextField, session)
+
+	resp := NewSuccessResponse(SessionResponse{
+		Token:   session.Token(),
+		UserID:  session.UserID(),
+		Expires: session.Expires(),
+	})
 
 	cookie := http.Cookie{
 		Name:    XSRFCookieName,
-		Value:   token,
-		Expires: expire,
+		Value:   session.Token(),
+		Expires: session.Expires(),
 		// Setze Path auf / ansonsten kann angularjs
 		// diese Cookie nicht finden und in späteren
 		// Request nicht mitsenden.
