@@ -9,18 +9,6 @@ Zum zweiten gibt es ein Handler Wrapper um zu prüfen ob ein Benutzer angelemdet
 
 ```go
 
-type SessionStore interface {
-    NewSession(userID string, expires time.Time) (token string, error)
-    ReadSession(token string) (Session, bool)
-    RemoveSession(token string) error
-    RemoveExpiredSession() (count int, error)
-}
-
-type UserSignIn interface {
-    FindUser(name string) (id string, error)
-    ValidPassword(pass string) bool
-}
-
 func handler(c *gin.Context) {
     c.String(200, "Secret!")
 }
