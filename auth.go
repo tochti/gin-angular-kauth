@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/tochti/session-stores"
+	"github.com/tochti/session-store"
 )
 
 const (
