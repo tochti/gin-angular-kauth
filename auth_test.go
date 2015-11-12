@@ -11,9 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"gopkg.in/mgo.v2"
-	"gopkg.in/mgo.v2/bson"
-
 	"github.com/gin-gonic/gin"
 )
 
@@ -31,17 +28,63 @@ type (
 	}
 
 	TestUser struct {
-		id   string
-		pass string
+		name     string
+		password string
+	}
+
+	TestSessionStore struct {
+		token   string
+		user    string
+		expires time.Time
 	}
 )
 
+func (u TestUser) FindUser(name string) (User, error) {
+	return u, nil
+}
+
+func (u TestUser) ValidPassword(pass string) bool {
+	return u.password == pass
+}
+
 func (u TestUser) ID() string {
-	return u.id
+	return u.name
 }
 
 func (u TestUser) Password() string {
-	return u.pass
+	return u.password
+}
+
+func (s TestSessionStore) NewSession(id string, expires time.Time) (string, error) {
+	return s.token, nil
+}
+
+func (s TestSessionStore) ReadSession(id string) (Session, bool) {
+	if id != s.token || s.expires.Before(time.Now()) {
+		return nil, false
+	}
+
+	return s, true
+}
+
+func (s TestSessionStore) RemoveSession(id string) error {
+	return nil
+}
+
+func (s TestSessionStore) RemoveExpiredSessions() (int, error) {
+	return 0, nil
+}
+
+func (s TestSessionStore) Token() string {
+	return s.token
+}
+
+func (s TestSessionStore) Expires() time.Time {
+	return s.expires
+}
+
+func (s TestSessionStore) UserID() string {
+	return s.user
 }
 
 func (t *TestRequest) SendWithToken(method, path, token string) *httptest.ResponseRecorder {
@@ -66,39 +109,6 @@ func (t *TestRequest) Send(method, path string) *httptest.ResponseRecorder {
 	reqData.Handler.ServeHTTP(w, req)
 	*t = reqData
 	return w
-}
-
-func NewTestSession(user, token string, db *mgo.Database, t *testing.T) {
-	coll := db.C(TestSessionsColl)
-	expires := time.Now().AddDate(0, 0, 1)
-	session := Session{
-		Token:   token,
-		UserID:  user,
-		Expires: expires,
-	}
-	err := coll.Insert(session)
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-func DialTestDB(t *testing.T) (*mgo.Session, *mgo.Database) {
-	s, err := mgo.Dial(TestDBURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	db := s.DB(TestDBName)
-
-	return s, db
-}
-
-func CleanTestDB(t *testing.T, s *mgo.Session, db *mgo.Database) {
-	err := db.DropDatabase()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	s.Close()
 }
 
 func ParseSignInResponse(r *bytes.Buffer) (SuccessResponse, error) {
@@ -174,7 +184,7 @@ func EqualFailResponse(r1, r2 FailResponse) error {
 	return nil
 }
 
-func EqualSession(s1, s2 Session) error {
+func EqualSession(s1, s2 SessionData) error {
 	if s1.Token == s2.Token &&
 		s1.UserID == s2.UserID &&
 		s1.Expires.Equal(s2.Expires) {
@@ -211,43 +221,6 @@ func ExistsToken(tokens []string, t string) bool {
 	return true
 }
 
-func ExistsUserSession(coll *mgo.Collection, r SuccessResponse) error {
-	data, ok := r.Data.(UserIDData)
-	if !ok {
-		m := fmt.Sprintf("Wrong SuccessResponse %v", r)
-		return errors.New(m)
-	}
-	query := bson.M{"UserID": data.ID}
-	c, err := coll.Find(query).Count()
-	if err != nil {
-		return err
-	}
-
-	if c != 1 {
-		return errors.New("Expect new session in db")
-	}
-
-	return nil
-}
-
-func EncryptPassword(p string) string {
-	return p
-}
-
-func Test_NewSessionToken_OK(t *testing.T) {
-	tokens := []string{}
-	for x := 0; x < 10; x++ {
-		token, err := NewSessionToken()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !ExistsToken(tokens, token) {
-			t.Fatal("Expect every token to be unique", token)
-		}
-		tokens = append(tokens, token)
-	}
-}
-
 func Test_NewSha512Password_OK(t *testing.T) {
 	tokens := []string{}
 	for x := 0; x < 10; x++ {
@@ -260,68 +233,72 @@ func Test_NewSha512Password_OK(t *testing.T) {
 }
 
 func Test_VerifyAuth_OK(t *testing.T) {
-	s, db := DialTestDB(t)
-	defer CleanTestDB(t, s, db)
-
-	userName := "loveMaster_999"
-	userToken := "123"
-	NewTestSession(userName, userToken, db, t)
+	sessionStore := TestSessionStore{
+		token:   "123",
+		user:    "lovemaster_XXX",
+		expires: time.Now().Add(1 * time.Hour),
+	}
 
 	h := gin.New()
 	// Test if session key in gin context
 	afterAuth := func(c *gin.Context) {
-		se, err := c.Get(GinContextField)
-		if err != nil {
-			t.Fatal(err)
+		se, ok := c.Get(GinContextField)
+		if !ok {
+			m := fmt.Sprintf("Missing Field %v", GinContextField)
+			t.Fatal(m)
 		}
 		c.JSON(http.StatusOK, se)
 	}
-	auth := AngularAuth(db, TestSessionsColl)
-	h.GET("/", auth, afterAuth)
+	signedIn := SignedIn(sessionStore)
+	h.GET("/", signedIn(afterAuth))
 
 	request := TestRequest{
 		Body:    "",
 		Header:  http.Header{},
 		Handler: h,
 	}
-	response := request.SendWithToken("GET", "/", userToken)
+	response := request.SendWithToken("GET", "/", sessionStore.Token())
 
 	if response.Code != 200 {
 		t.Fatal("Expect http-status 200 was", response.Code)
 	}
 
-	session := Session{}
+	session := SessionData{}
 	err := json.Unmarshal(response.Body.Bytes(), &session)
 	if err != nil {
 		t.Fatal(err.Error())
 	}
 
-	if session.UserID != userName {
-		t.Fatal("Expect", userName, "was", session.UserID)
+	if session.UserID != sessionStore.UserID() {
+		t.Fatal("Expect", sessionStore.UserID(), "was", session.UserID)
 	}
 
-	if session.Token != userToken {
-		t.Fatal("Expect", userToken, "was", session.Token)
+	if session.Token != sessionStore.Token() {
+		t.Fatal("Expect", sessionStore.Token(), "was", session.Token)
 	}
 
 }
 
 func Test_VerifyAuth_Fail(t *testing.T) {
-	s, db := DialTestDB(t)
-	defer CleanTestDB(t, s, db)
+	sessionStore := TestSessionStore{
+		user:    "pimp1999",
+		token:   "123",
+		expires: time.Now().Add(1 * time.Hour),
+	}
 
-	h := gin.New()
-	auth := AngularAuth(db, TestSessionsColl)
+	signedIn := SignedIn(sessionStore)
 	afterAuth := func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"Status": "success"})
 	}
-	h.GET("/", auth, afterAuth)
+
+	h := gin.New()
+	h.GET("/", signedIn(afterAuth))
 	request := TestRequest{
 		Body:    "",
 		Header:  http.Header{},
 		Handler: h,
 	}
-	response := request.SendWithToken("GET", "/", "123")
+	response := request.SendWithToken("GET", "/", "12")
 
 	if response.Code != 401 {
 		t.Fatal("Expect http-status 401 was", response.Code)
@@ -330,27 +307,17 @@ func Test_VerifyAuth_Fail(t *testing.T) {
 }
 
 func Test_VerifyAuth_ExpiresFail(t *testing.T) {
-	s, db := DialTestDB(t)
-	defer CleanTestDB(t, s, db)
-
-	coll := db.C(TestSessionsColl)
-	expires := time.Now().AddDate(0, 0, -1)
-	session := Session{
-		Token:   "123",
-		UserID:  "loveMaster_999",
-		Expires: expires,
+	sessionStore := TestSessionStore{
+		token:   "123",
+		user:    "Schnecke1987",
+		expires: time.Now().Add(-1 * time.Hour),
 	}
-	err := coll.Insert(session)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	h := gin.New()
-	auth := AngularAuth(db, TestSessionsColl)
+	signedIn := SignedIn(sessionStore)
 	afterAuth := func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"Status": "success"})
 	}
-	h.GET("/", auth, afterAuth)
+	h := gin.New()
+	h.GET("/", signedIn(afterAuth))
 	request := TestRequest{
 		Body:    "",
 		Header:  http.Header{},
@@ -366,14 +333,16 @@ func Test_VerifyAuth_ExpiresFail(t *testing.T) {
 }
 
 func Test_GET_SignIn_OK(t *testing.T) {
-	id := "456"
-	name := "ladykiller_XX"
-	pass := "123"
+	userStore := TestUser{
+		name:     "ladykiller_XX",
+		password: "123",
+	}
 
-	s, db := DialTestDB(t)
-	defer CleanTestDB(t, s, db)
-
-	coll := db.C(TestSessionsColl)
+	sessionStore := TestSessionStore{
+		user:    userStore.name,
+		token:   "544",
+		expires: time.Now().Add(1 * time.Hour),
+	}
 
 	handler := gin.New()
 	req := TestRequest{
@@ -382,20 +351,14 @@ func Test_GET_SignIn_OK(t *testing.T) {
 		Handler: handler,
 	}
 
-	getPass := func(x string) (User, error) {
-		u := TestUser{id, pass}
-		return u, nil
-	}
+	h := SignIn(sessionStore, userStore)
+	handler.GET("/:name/:password", h)
 
-	d := time.Duration(1 * time.Hour)
-	h := AngularSignIn(coll, getPass, EncryptPassword, d)
-	handler.GET("/:name/:pass", h)
-
-	url := fmt.Sprintf("/%v/%v", name, pass)
+	url := fmt.Sprintf("/%v/%v", userStore.name, userStore.password)
 	resp := req.Send("GET", url)
 
 	userID := UserIDData{
-		ID: id,
+		ID: userStore.name,
 	}
 	expectResp := NewSuccessResponse(userID)
 
@@ -414,21 +377,18 @@ func Test_GET_SignIn_OK(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = ExistsUserSession(coll, result)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 }
 
 func Test_GET_SignIn_Fail(t *testing.T) {
-	name := "ladykiller_XX"
-	pass := "123"
-
-	s, db := DialTestDB(t)
-	defer CleanTestDB(t, s, db)
-
-	coll := db.C(TestSessionsColl)
+	userStore := TestUser{
+		name:     "cooldancer_123",
+		password: "123",
+	}
+	sessionStore := TestSessionStore{
+		user:    userStore.name,
+		token:   "444",
+		expires: time.Now().Add(1 * time.Hour),
+	}
 
 	handler := gin.New()
 	req := TestRequest{
@@ -437,16 +397,10 @@ func Test_GET_SignIn_Fail(t *testing.T) {
 		Handler: handler,
 	}
 
-	getPass := func(x string) (User, error) {
-		u := TestUser{}
-		return u, nil
-	}
-
-	e := time.Duration(1 * time.Hour)
-	h := AngularSignIn(coll, getPass, EncryptPassword, e)
+	h := SignIn(sessionStore, userStore)
 	handler.GET("/:name/:pass", h)
 
-	url := fmt.Sprintf("/%v/%v", name, pass)
+	url := fmt.Sprintf("/%v/%v", userStore.name, "wrong")
 	resp := req.Send("GET", url)
 
 	resultResp, err := ParseFailResponse(resp.Body)
@@ -464,7 +418,7 @@ func Test_GET_SignIn_Fail(t *testing.T) {
 func Test_ReadSession_OK(t *testing.T) {
 	ctx := &gin.Context{}
 
-	session := Session{
+	session := SessionData{
 		UserID:  "",
 		Token:   "",
 		Expires: time.Now(),

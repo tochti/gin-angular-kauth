@@ -1,8 +1,6 @@
 package aauth
 
 import (
-	"crypto/rand"
-	"crypto/sha256"
 	"crypto/sha512"
 	"errors"
 	"fmt"
@@ -10,8 +8,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"gopkg.in/mgo.v2"
-	"gopkg.in/mgo.v2/bson"
 )
 
 const (
@@ -19,11 +15,12 @@ const (
 	XSRFCookieName   = "XSRF-TOKEN"
 	TokenHeaderField = "X-XSRF-TOKEN"
 	NameRequestField = "name"
-	PassRequestField = "pass"
+	PassRequestField = "password"
 )
 
 var (
 	SignInErr = errors.New("Sign in error")
+	CookieErr = errors.New("Cookie error")
 )
 
 type (
@@ -37,14 +34,29 @@ type (
 		Err    string
 	}
 
+	ErrorHandler func(*gin.Context) error
+
 	UserIDData struct {
 		ID string
 	}
 
-	Session struct {
+	SessionData struct {
 		Token   string    `bson:"Token"`
 		UserID  string    `bson:"UserID"`
 		Expires time.Time `bson:"Expires"`
+	}
+
+	Session interface {
+		Token() string
+		UserID() string
+		Expires() time.Time
+	}
+
+	SessionStore interface {
+		NewSession(string, time.Time) (string, error)
+		ReadSession(string) (Session, bool)
+		RemoveSession(string) error
+		RemoveExpiredSessions() (int, error)
 	}
 
 	User interface {
@@ -52,8 +64,10 @@ type (
 		Password() string
 	}
 
-	FindUser        func(string) (User, error)
-	ConvertPassword func(string) string
+	UserStore interface {
+		FindUser(string) (User, error)
+		ValidPassword(string) bool
+	}
 )
 
 func NewSuccessResponse(data interface{}) SuccessResponse {
@@ -70,20 +84,6 @@ func NewFailResponse(err interface{}) FailResponse {
 	}
 }
 
-func NewSessionToken() (string, error) {
-	buf := make([]byte, 2)
-
-	_, err := rand.Read(buf)
-	if err != nil {
-		return "", err
-	}
-
-	c := sha256.New()
-	hash := fmt.Sprintf("%x", c.Sum(buf))
-
-	return hash, nil
-}
-
 func NewSha512Password(pass string) string {
 	hash := sha512.New()
 	tmp := hash.Sum([]byte(pass))
@@ -91,57 +91,47 @@ func NewSha512Password(pass string) string {
 	return passHash
 }
 
-func ReadSession(ctx *gin.Context) (Session, error) {
-	v, err := ctx.Get(GinContextField)
-	if err != nil {
-		return Session{}, err
+func ReadSession(c *gin.Context) (SessionData, error) {
+	v, ok := c.Get(GinContextField)
+	if !ok {
+		return SessionData{}, CookieErr
 	}
 
-	s, ok := v.(Session)
+	s, ok := v.(SessionData)
 	if !ok {
-		return Session{}, errors.New("Wrong session in cookie")
+		return SessionData{}, CookieErr
 	}
 
 	return s, nil
 }
 
-// Middleware Decorator:
-// Handles Angularjs Default Authentication
-// Sendet man über den angular http Serviecs ein Request und erhält
-// daraufhin ein Response mit einem Cookie welcher ein XSRF-Token Feld
-// enthält wird der hinterlegte Token für zukünftige Request verwendet.
-// Der Token wird als HTTP-Header-Feld X-XSRF-Token versand. Diesen
-// Eigenschaft kann man für die Benutzer Authentifikation verwenden.
-//
-// Die Middleware fügt ein Feld Session zum gin Context.
-//
-// Die Middleware erwartet ein Session Collection mit den selben
-// Feldern wie der Session Typ
-//
-// Example:
-// app := gin.New()
-//
-// func protectedHandler(c *gin.Context) {
-//      // Access only for succesfully authenticated user
-// }
-//
-// s,_ := db.Dial("mongodb://127.0.0.1:27017")
-// db := s.DB("DBName")
-// auth := AngularAuth(*mgo.Database, "SessionCollName")
-// app.GET(auth, portectedHandler)
-//
-func AngularAuth(db *mgo.Database, coll string) gin.HandlerFunc {
+func ErrorWrap(h ErrorHandler) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		err := Auther(c, db, coll)
+		err := h(c)
 		if err != nil {
 			c.JSON(http.StatusUnauthorized,
 				NewFailResponse(err))
-			c.Abort()
 		}
+	}
+
+}
+
+func SignedIn(s SessionStore) func(gin.HandlerFunc) gin.HandlerFunc {
+	return func(h gin.HandlerFunc) gin.HandlerFunc {
+		return func(c *gin.Context) {
+			err := Bouncer(c, s)
+			if err != nil {
+				c.JSON(http.StatusUnauthorized,
+					NewFailResponse(err))
+			}
+
+			h(c)
+		}
+
 	}
 }
 
-func Auther(c *gin.Context, db *mgo.Database, sessionsColl string) error {
+func Bouncer(c *gin.Context, s SessionStore) error {
 	token := c.Request.Header.Get(TokenHeaderField)
 	if token == "" {
 		cookie, err := c.Request.Cookie(XSRFCookieName)
@@ -154,53 +144,41 @@ func Auther(c *gin.Context, db *mgo.Database, sessionsColl string) error {
 		}
 	}
 
-	coll := db.C(sessionsColl)
-	find := coll.Find(bson.M{"Token": token})
-	n, err := find.Count()
-	if err != nil {
-		return err
-	}
-	if n != 1 {
+	session, ok := s.ReadSession(token)
+	if !ok {
 		return errors.New("Session not found")
 
 	}
 
-	session := Session{}
-	err = find.One(&session)
-	if err != nil {
-		return err
-	}
-	if session.Expires.Before(time.Now()) {
-		return errors.New("Session expired")
+	ctxSession := SessionData{
+		Token:   session.Token(),
+		UserID:  session.UserID(),
+		Expires: session.Expires(),
 	}
 
-	c.Set(GinContextField, session)
-	c.Next()
+	c.Set(GinContextField, ctxSession)
 	return nil
 }
 
-func AngularSignIn(coll *mgo.Collection, findUser FindUser, cPass ConvertPassword, expireTime time.Duration) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		err := Signer(c, coll, findUser, cPass, expireTime)
-		if err != nil {
-			c.JSON(http.StatusUnauthorized,
-				NewFailResponse(err))
-		}
+func SignIn(s SessionStore, u UserStore) gin.HandlerFunc {
+	handler := func(c *gin.Context) error {
+		return Signer(c, s, u)
 	}
+
+	return ErrorWrap(handler)
+
 }
 
-func Signer(c *gin.Context, coll *mgo.Collection, findUser FindUser, convertPassword ConvertPassword, expireTime time.Duration) error {
+func Signer(c *gin.Context, s SessionStore, u UserStore) error {
 	name := c.Params.ByName(NameRequestField)
 	pass := c.Params.ByName(PassRequestField)
 
-	passHash := convertPassword(pass)
-
-	user, err := findUser(name)
+	user, err := u.FindUser(name)
 	if err != nil {
 		return err
 	}
 
-	if user.Password() != passHash {
+	if !u.ValidPassword(pass) {
 		return SignInErr
 	}
 
@@ -208,27 +186,23 @@ func Signer(c *gin.Context, coll *mgo.Collection, findUser FindUser, convertPass
 		ID: user.ID(),
 	})
 
-	sessionToken, err := NewSessionToken()
+	expire := time.Now().Add(24 * time.Hour)
+	token, err := s.NewSession(user.ID(), expire)
 	if err != nil {
 		return err
 	}
 
-	expire := time.Now().Add(expireTime)
-
-	session := Session{
+	session := SessionData{
 		UserID:  user.ID(),
-		Token:   sessionToken,
+		Token:   token,
 		Expires: expire,
 	}
 
-	err = coll.Insert(session)
-	if err != nil {
-		return err
-	}
+	c.Set(GinContextField, session)
 
 	cookie := http.Cookie{
 		Name:    XSRFCookieName,
-		Value:   sessionToken,
+		Value:   token,
 		Expires: expire,
 		// Setze Path auf / ansonsten kann angularjs
 		// diese Cookie nicht finden und in späteren
