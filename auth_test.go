@@ -416,7 +416,7 @@ func Test_GET_SignIn_Fail(t *testing.T) {
 	}
 
 	h := SignIn(sessionStore, userStore)
-	handler.GET("/:name/:pass", h)
+	handler.GET("/:name/:password", h)
 
 	url := fmt.Sprintf("/%v/%v", userStore.name, "wrong")
 	resp := req.Send("GET", url)
