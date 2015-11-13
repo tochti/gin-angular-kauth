@@ -160,7 +160,7 @@ func Signer(c *gin.Context, s s2tore.SessionStore, u UserStore) error {
 		return err
 	}
 
-	if !u.ValidPassword(pass) {
+	if !user.ValidPassword(pass) {
 		return SignInErr
 	}
 
