@@ -111,6 +111,7 @@ func SignedIn(s s2tore.SessionStore) func(gin.HandlerFunc) gin.HandlerFunc {
 			if err != nil {
 				c.JSON(http.StatusUnauthorized,
 					NewFailResponse(err))
+				return
 			}
 
 			h(c)
