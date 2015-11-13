@@ -50,11 +50,11 @@ type (
 	User interface {
 		ID() string
 		Password() string
+		ValidPassword(string) bool
 	}
 
 	UserStore interface {
 		FindUser(string) (User, error)
-		ValidPassword(string) bool
 	}
 )
 
