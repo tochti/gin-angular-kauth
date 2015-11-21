@@ -7,6 +7,8 @@ Hier ist definiert das wenn ein Response ein Cookien mit einen bestimmten Namen 
 Zum einem gibt es die Möglichkeit einen Benutzer anzumelden und einen Session dafür anzulegen.
 Zum zweiten gibt es ein Handler Wrapper um zu prüfen ob ein Benutzer angelemdet ist.
 
+:name und :password müssen ein base64 String sein.
+
 ```go
 
 func handler(c *gin.Context) {

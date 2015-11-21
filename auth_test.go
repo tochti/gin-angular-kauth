@@ -2,6 +2,7 @@ package kauth
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -182,10 +183,12 @@ func EqualSignInResponse(r1, r2 SuccessResponse) error {
 
 func EqualFailResponse(r1, r2 FailResponse) error {
 	if r1.Status != r2.Status {
-		return errors.New("Unequal status")
+		m := fmt.Sprintf("Expect %v was %v", r1.Status, r2.Status)
+		return errors.New(m)
 	}
 	if r1.Err != r2.Err {
-		return errors.New("Unequal error")
+		m := fmt.Sprintf("Expect %v was %v", r1.Err, r2.Err)
+		return errors.New(m)
 	}
 
 	return nil
@@ -371,7 +374,10 @@ func Test_GET_SignIn_OK(t *testing.T) {
 	h := SignIn(sessionStore, userStore)
 	handler.GET("/:name/:password", h)
 
-	url := fmt.Sprintf("/%v/%v", userStore.name, userStore.password)
+	name := base64.StdEncoding.EncodeToString([]byte(userStore.name))
+	pass := base64.StdEncoding.EncodeToString([]byte(userStore.password))
+
+	url := fmt.Sprintf("/%v/%v", name, pass)
 	resp := req.Send("GET", url)
 
 	userID := SessionResponse{
@@ -418,7 +424,10 @@ func Test_GET_SignIn_Fail(t *testing.T) {
 	h := SignIn(sessionStore, userStore)
 	handler.GET("/:name/:password", h)
 
-	url := fmt.Sprintf("/%v/%v", userStore.name, "wrong")
+	name := base64.StdEncoding.EncodeToString([]byte(userStore.name))
+	pass := base64.StdEncoding.EncodeToString([]byte("wrong"))
+
+	url := fmt.Sprintf("/%v/%v", name, pass)
 	resp := req.Send("GET", url)
 
 	resultResp, err := ParseFailResponse(resp.Body)

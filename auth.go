@@ -2,6 +2,7 @@ package kauth
 
 import (
 	"crypto/sha512"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -153,8 +154,18 @@ func SignIn(s s2tore.SessionStore, u UserStore) gin.HandlerFunc {
 }
 
 func Signer(c *gin.Context, s s2tore.SessionStore, u UserStore) error {
-	name := c.Params.ByName(NameRequestField)
-	pass := c.Params.ByName(PassRequestField)
+	nameParam := c.Params.ByName(NameRequestField)
+	tmp, err := base64.StdEncoding.DecodeString(nameParam)
+	if err != nil {
+		return err
+	}
+	name := string(tmp)
+	passParam := c.Params.ByName(PassRequestField)
+	tmp, err = base64.StdEncoding.DecodeString(passParam)
+	if err != nil {
+		return err
+	}
+	pass := string(tmp)
 
 	user, err := u.FindUser(name)
 	if err != nil {
